@@ -1,0 +1,72 @@
+name: CI
+
+# Chạy khi push vào main VÀ khi mở pull request nhắm vào main — bắt lỗi
+# TRƯỚC khi merge mới là giá trị chính của CI, không phải sau.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ── Job 1: chạy toàn bộ checkpoint trên máy sạch của GitHub ──────────
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run test suite
+        # Bỏ test_cp5.py vì nó gọi vào bản deploy đang sống (luôn đỏ/chờ
+        # mạng trên máy CI); bỏ test_bonus_cicd.py vì nó tự kiểm tra badge
+        # của chính workflow này — chạy ở đây là tự tham chiếu vòng tròn.
+        env:
+          AGENT_API_KEY: ci-dummy
+          REDIS_URL: "fake://"
+        run: >
+          pytest -v
+          --ignore=tests/test_cp5.py
+          --ignore=tests/test_bonus_cicd.py
+
+  # ── Job 2: build thử Docker image trên máy sạch ──────────────────────
+  build:
+    name: Build Docker image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t day12-agent:ci .
+
+  # ── Job 3: chỉ deploy khi CẢ hai job trên đều xanh, và chỉ từ nhánh main ──
+  deploy:
+    name: Deploy to Railway
+    needs: [test, build]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+
+      - name: Deploy to Railway
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: railway up --service agent --ci
+
+      - name: Smoke test — service còn sống sau deploy không?
+        run: |
+          sleep 45
+          curl -fsS "https://agent-production-a5f0.up.railway.app/health"
